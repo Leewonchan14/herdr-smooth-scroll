@@ -29,6 +29,7 @@ import threading
 import time
 
 SESSION = "herdr-smooth-scroll-lab"
+SESSION_DIR = os.path.expanduser(f"~/.config/herdr/sessions/{SESSION}")
 PLUGIN = "Leewonchan14.herdr-smooth-scroll"
 SOCK = os.path.expanduser(f"~/.config/herdr/sessions/{SESSION}/herdr.sock")
 STATE_GLOB_DIR = os.path.expanduser("~/.local/state/herdr/plugins")
@@ -73,7 +74,8 @@ def sock_call(method, params, timeout=5):
 
 
 def pane_scroll(pane_id):
-    return sock_call("pane.get", {"pane_id": pane_id})["pane"]["scroll"]
+    """Scroll metrics for a pane, or None while the pane's terminal has no metrics yet."""
+    return sock_call("pane.get", {"pane_id": pane_id})["pane"].get("scroll")
 
 
 def pane_top_line(screen):
@@ -226,8 +228,9 @@ class OffsetSampler:
     def _run(self):
         while not self._stop:
             try:
-                offset = pane_scroll(self.pane_id)["offset_from_bottom"]
-                self.samples.append((time.monotonic(), offset))
+                state = pane_scroll(self.pane_id)
+                if state is not None:
+                    self.samples.append((time.monotonic(), state["offset_from_bottom"]))
             except Exception:
                 pass
             time.sleep(SAMPLE_INTERVAL)
@@ -322,6 +325,13 @@ def main():
         return 2
 
     log_before = state_log_text()
+    # Start from a clean session: a stale saved workspace (for example one whose cwd no longer
+    # exists) restores without a live terminal and the lab would never see scroll metrics.
+    subprocess.run(
+        ["herdr", "--session", SESSION, "server", "stop"], capture_output=True, text=True
+    )
+    time.sleep(0.3)
+    shutil.rmtree(SESSION_DIR, ignore_errors=True)
     lab = Lab()
     failures = []
     try:
@@ -341,18 +351,19 @@ def main():
 
         pane_id = json.loads(lab.cli("pane", "list").stdout)["result"]["panes"][0]["pane_id"]
 
-        # Fill the pane with numbered lines and wait for the scrollback to settle.
+        # Fill the pane with numbered lines and wait for the scrollback and metrics to settle.
         lab.cli("pane", "run", pane_id, f"seq 1 {FIXTURE_LINES}")
         deadline = time.time() + 20
+        baseline = None
         while time.time() < deadline:
-            if pane_scroll(pane_id)["max_offset_from_bottom"] >= FIXTURE_LINES // 2:
+            state = pane_scroll(pane_id)
+            if state and state["max_offset_from_bottom"] >= FIXTURE_LINES // 2:
+                baseline = state
                 break
             time.sleep(0.25)
-        else:
-            failures.append("fixture output never produced scrollback")
+        if baseline is None:
+            failures.append("fixture output never produced scrollback metrics")
             raise SystemExit(report(failures))
-
-        baseline = pane_scroll(pane_id)
         expected_lines = max(1, baseline["viewport_rows"] // 2)
         expected_final = baseline["offset_from_bottom"] + expected_lines
         top_before = first_visible_line(pane_id)
@@ -376,8 +387,8 @@ def main():
             failures.append(f"sampled offsets were not strictly increasing: {offsets[:10]}...")
 
         final = pane_scroll(pane_id)
-        if final["offset_from_bottom"] != expected_final:
-            failures.append(f"final offset {final['offset_from_bottom']} != expected {expected_final}")
+        if final is None or final["offset_from_bottom"] != expected_final:
+            failures.append(f"final offset {final and final['offset_from_bottom']} != expected {expected_final}")
 
         top_after = first_visible_line(pane_id)
         try:
@@ -417,7 +428,11 @@ def main():
                 )
 
         # A scroll past the top edge must stop at max_offset_from_bottom without stepping.
-        top = pane_scroll(pane_id)["max_offset_from_bottom"]
+        edge_state = pane_scroll(pane_id)
+        top = edge_state["max_offset_from_bottom"] if edge_state else None
+        if top is None:
+            failures.append("scroll metrics disappeared before the edge check")
+            raise SystemExit(report(failures))
         sock_call("pane.scroll", {"pane_id": pane_id, "offset_from_bottom": top})
         edge_events = ScrollEvents(pane_id)
         lab.cli("plugin", "action", "invoke", "page-up", "--plugin", PLUGIN)
@@ -425,7 +440,8 @@ def main():
         edge_events.close()
         if edge_events.events:
             failures.append(f"edge scroll emitted {len(edge_events.events)} steps")
-        if pane_scroll(pane_id)["offset_from_bottom"] != top:
+        edge_after = pane_scroll(pane_id)
+        if edge_after is None or edge_after["offset_from_bottom"] != top:
             failures.append("edge scroll moved past max_offset_from_bottom")
 
         log = state_log_text()[len(log_before):]
