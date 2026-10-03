@@ -200,20 +200,28 @@ class Lab:
             timeout=30,
         )
 
-    def close(self):
-        try:
-            self.cli("server", "stop")
-        except Exception:
-            pass
+    def detach(self):
+        """Detach the PTY client; the server keeps the pane and its scroll state."""
+        if self.proc is None:
+            return
         self.proc.send_signal(signal.SIGTERM)
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        self.proc = None
         try:
             os.close(self.master)
         except OSError:
             pass
+        self.master = None
+
+    def close(self):
+        try:
+            self.cli("server", "stop")
+        except Exception:
+            pass
+        self.detach()
 
 
 class OffsetSampler:
@@ -240,52 +248,6 @@ class OffsetSampler:
 
     def stop(self):
         self._stop = True
-        self._thread.join(timeout=2)
-
-
-class ScrollEvents:
-    """A `pane.scroll_changed` subscription; used to prove that no pane.scroll call happened."""
-
-    def __init__(self, pane_id):
-        self.stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.stream.connect(SOCK)
-        self.file = self.stream.makefile("rwb")
-        request = json.dumps(
-            {
-                "id": "sub",
-                "method": "events.subscribe",
-                "params": {"subscriptions": [{"type": "pane.scroll_changed", "pane_id": pane_id}]},
-            }
-        )
-        self.file.write((request + "\n").encode())
-        self.file.flush()
-        self.stream.settimeout(5)
-        ack = json.loads(self.file.readline())
-        assert ack["result"]["type"] == "subscription_started", ack
-        self.events = []
-        self._stop = False
-        self._thread = threading.Thread(target=self._read, daemon=True)
-        self._thread.start()
-
-    def _read(self):
-        self.stream.settimeout(30)
-        while not self._stop:
-            try:
-                line = self.file.readline()
-            except OSError:
-                break
-            if not line:
-                break
-            event = json.loads(line)
-            if event.get("event") == "pane.scroll_changed":
-                self.events.append(event["data"]["scroll"]["offset_from_bottom"])
-
-    def close(self):
-        self._stop = True
-        try:
-            self.stream.close()
-        except OSError:
-            pass
         self._thread.join(timeout=2)
 
 
@@ -432,19 +394,27 @@ def main():
                     f"rendered {len(distinct_tops)} frames: {distinct_tops[0]} -> {distinct_tops[-1]}"
                 )
 
-        # A scroll past the top edge must stop at max_offset_from_bottom without stepping.
+        # A scroll past the top edge must stop at max_offset_from_bottom without stepping. Detach
+        # the client first: a rendering client can push its own (possibly stale) scroll offset back
+        # to the server, which would race this check. The server keeps the pane when it detaches.
+        lab.detach()
+        time.sleep(0.3)
         edge_state = pane_scroll(pane_id)
         top = edge_state["max_offset_from_bottom"] if edge_state else None
         if top is None:
             failures.append("scroll metrics disappeared before the edge check")
             raise SystemExit(report(failures))
         sock_call("pane.scroll", {"pane_id": pane_id, "offset_from_bottom": top})
-        edge_events = ScrollEvents(pane_id)
+        edge_log_before = len(state_log_text())
         lab.cli("plugin", "action", "invoke", "page-up", "--plugin", PLUGIN)
         time.sleep(1.0)
-        edge_events.close()
-        if edge_events.events:
-            failures.append(f"edge scroll emitted {len(edge_events.events)} steps")
+        edge_lines = state_log_text()[edge_log_before:].strip().splitlines()
+        edge_ok = any(
+            "kind=Fullpage" in line and "steps=0" in line and f"from={top} to={top}" in line
+            for line in edge_lines
+        )
+        if not edge_ok:
+            failures.append(f"edge scroll did not stop cleanly: {edge_lines or 'no log line'}")
         edge_after = pane_scroll(pane_id)
         if edge_after is None or edge_after["offset_from_bottom"] != top:
             failures.append("edge scroll moved past max_offset_from_bottom")
