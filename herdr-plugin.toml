@@ -1,0 +1,45 @@
+id = "Leewonchan14.herdr-smooth-scroll"
+name = "herdr-smooth-scroll"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Eased, line-by-line scrollback scrolling for Herdr panes (a tmux-smooth-scroll port)"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+[[actions]]
+id = "scroll-up"
+title = "Smooth scroll up"
+description = "Scroll the focused pane up 3 lines, one line at a time"
+command = ["./target/release/herdr-smooth-scroll", "up", "normal"]
+
+[[actions]]
+id = "scroll-down"
+title = "Smooth scroll down"
+description = "Scroll the focused pane down 3 lines, one line at a time"
+command = ["./target/release/herdr-smooth-scroll", "down", "normal"]
+
+[[actions]]
+id = "halfpage-up"
+title = "Smooth half-page up"
+description = "Scroll the focused pane up half a screen, one line at a time"
+command = ["./target/release/herdr-smooth-scroll", "up", "halfpage"]
+
+[[actions]]
+id = "halfpage-down"
+title = "Smooth half-page down"
+description = "Scroll the focused pane down half a screen, one line at a time"
+command = ["./target/release/herdr-smooth-scroll", "down", "halfpage"]
+
+[[actions]]
+id = "page-up"
+title = "Smooth page up"
+description = "Scroll the focused pane up one screen, one line at a time"
+command = ["./target/release/herdr-smooth-scroll", "up", "fullpage"]
+
+[[actions]]
+id = "page-down"
+title = "Smooth page down"
+description = "Scroll the focused pane down one screen, one line at a time"
+command = ["./target/release/herdr-smooth-scroll", "down", "fullpage"]
